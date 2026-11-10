@@ -3,7 +3,6 @@
   "displayName": "Daikin One Local",
   "type": "module",
   "version": "0.1.7",
-  "private": true,
   "description": "Local LAN integration for Daikin One+ and One Touch thermostats",
   "author": "weijianw",
   "license": "Apache-2.0",

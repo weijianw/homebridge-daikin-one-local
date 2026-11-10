@@ -10,7 +10,7 @@ Homebridge integration for Daikin One+ and One Touch thermostats using the [offi
 ## Setup
 
 1. Update the thermostat firmware and enable **Settings → Wi-Fi → Local API → ON** on the thermostat.
-2. Once published, install `homebridge-daikin-one-local` from the Homebridge UI Plugins tab.
+2. Install `homebridge-daikin-one-local` from the Homebridge UI Plugins tab.
 3. Add this platform configuration in Homebridge UI or in the `platforms` array of `config.json`:
 
    ```json
