@@ -1,18 +1,17 @@
 {
-  "pluginAlias": "ExampleHomebridgePlugin",
+  "pluginAlias": "DaikinOneLocal",
   "pluginType": "platform",
   "singular": true,
-  "strictValidation": false,
+  "headerDisplay": "One manually configured thermostat. Local API must be enabled on a trusted LAN. Writes are disabled by default.",
   "schema": {
     "type": "object",
-    "required": ["name"],
-    "additionalProperties": false,
     "properties": {
-      "name": {
-        "title": "Name",
-        "type": "string",
-        "default": "Example Dynamic Platform"
-      }
+      "name": { "title": "Name", "type": "string", "default": "Daikin One Local" },
+      "host": { "title": "Thermostat IP or hostname", "type": "string", "required": true, "description": "No http:// prefix or port. Automatic discovery is not implemented." },
+      "port": { "title": "HTTP port", "type": "integer", "default": 80, "minimum": 1, "maximum": 65535 },
+      "pollInterval": { "title": "Polling interval (milliseconds)", "type": "integer", "default": 15000, "minimum": 5000, "maximum": 2147483647 },
+      "enableWrites": { "title": "Enable thermostat writes", "type": "boolean", "default": false, "description": "Allow HVAC mode and temperature setpoint POST requests. Leave disabled for initial checks." },
+      "debug": { "title": "Debug logging", "type": "boolean", "default": false }
     }
   }
 }

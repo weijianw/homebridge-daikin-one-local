@@ -1,148 +1,167 @@
 import type { CharacteristicValue, PlatformAccessory, Service } from 'homebridge';
+import type { DaikinOneLocalPlatform } from './platform.js';
+import { RateLimitError } from './daikinClient.js';
+import { ControlValidationError, displayUnits, equipmentState, modeUpdate, targetMode, targetTemperature, temperatureUpdate } from './mappings.js';
+import type { ControlUpdate, DeviceInfo, ThermostatInfo } from './types.js';
 
-import type { ExampleHomebridgePlatform } from './platform.js';
-
-/**
- * Platform Accessory
- * An instance of this class is created for each accessory your platform registers
- * Each accessory may expose multiple services of different service types.
- */
-export class ExamplePlatformAccessory {
-  private service: Service;
-
-  /**
-   * These are just used to create a working example
-   * You should implement your own code to track the state of your accessory
-   */
-  private exampleStates = {
-    On: false,
-    Brightness: 100,
-  };
-
-  constructor(
-    private readonly platform: ExampleHomebridgePlatform,
-    private readonly accessory: PlatformAccessory,
-  ) {
-    // set accessory information
-    this.accessory.getService(this.platform.Service.AccessoryInformation)!
-      .setCharacteristic(this.platform.Characteristic.Manufacturer, 'Default-Manufacturer')
-      .setCharacteristic(this.platform.Characteristic.Model, 'Default-Model')
-      .setCharacteristic(this.platform.Characteristic.SerialNumber, 'Default-Serial');
-
-    // get the LightBulb service if it exists, otherwise create a new LightBulb service
-    // you can create multiple services for each accessory
-
-    if (accessory.context.device.CustomService) {
-      // This is only required when using Custom Services and Characteristics not support by HomeKit
-      this.service = this.accessory.getService(this.platform.CustomServices[accessory.context.device.CustomService]) ||
-        this.accessory.addService(this.platform.CustomServices[accessory.context.device.CustomService]);
-    } else {
-      this.service = this.accessory.getService(this.platform.Service.Lightbulb) || this.accessory.addService(this.platform.Service.Lightbulb);
+export class DaikinAccessory {
+  private readonly thermostat: Service;
+  private current?: ThermostatInfo;
+  private online = false;
+  private pendingWrites: Array<{
+    update: (info: ThermostatInfo) => ControlUpdate;
+    resolve: () => void;
+    reject: (error: Error) => void;
+  }> = [];
+  private writeTimer?: ReturnType<typeof setTimeout>;
+  private activeWrite = false;
+  constructor(private readonly platform: DaikinOneLocalPlatform, private readonly accessory: PlatformAccessory) {
+    const { Service: S, Characteristic: C, Perms } = platform.api.hap;
+    this.thermostat = accessory.getService(S.Thermostat) ?? accessory.addService(S.Thermostat);
+    accessory.category = platform.api.hap.Categories.THERMOSTAT;
+    this.thermostat.setPrimaryService(true);
+    this.thermostat.setCharacteristic(C.Name, accessory.displayName);
+    const cachedFan = accessory.getService(S.Fanv2);
+    if (cachedFan) { accessory.removeService(cachedFan); }
+    platform.api.on?.('shutdown', () => {
+      clearTimeout(this.writeTimer);
+      const error = new platform.api.hap.HapStatusError(platform.api.hap.HAPStatus.SERVICE_COMMUNICATION_FAILURE);
+      for (const write of this.pendingWrites.splice(0)) { write.reject(error); }
+    });
+    // Optional temperature characteristics start with HAP defaults outside some device ranges.
+    // Leave them unset until the first validated reading supplies their limits and values.
+    for (const type of [C.HeatingThresholdTemperature, C.CoolingThresholdTemperature]) {
+      this.thermostat.getCharacteristic(type).value = null;
     }
-
-    // set the service name, this is what is displayed as the default name on the Home app
-    // in this example we are using the name we stored in the `accessory.context` in the `discoverDevices` method.
-    this.service.setCharacteristic(this.platform.Characteristic.Name, accessory.context.device.exampleDisplayName);
-
-    // each service must implement at-minimum the "required characteristics" for the given service type
-    // see https://developers.homebridge.io/#/service/Lightbulb
-
-    // register handlers for the On/Off Characteristic
-    this.service.getCharacteristic(this.platform.Characteristic.On)
-      .onSet(this.setOn.bind(this)) // SET - bind to the `setOn` method below
-      .onGet(this.getOn.bind(this)); // GET - bind to the `getOn` method below
-
-    // register handlers for the Brightness Characteristic
-    this.service.getCharacteristic(this.platform.Characteristic.Brightness)
-      .onSet(this.setBrightness.bind(this)); // SET - bind to the `setBrightness` method below
-
-    /**
-     * Creating multiple services of the same type.
-     *
-     * To avoid "Cannot add a Service with the same UUID another Service without also defining a unique 'subtype' property." error,
-     * when creating multiple services of the same type, you need to use the following syntax to specify a name and subtype id:
-     * this.accessory.getService('NAME') || this.accessory.addService(this.platform.Service.Lightbulb, 'NAME', 'USER_DEFINED_SUBTYPE_ID');
-     *
-     * The USER_DEFINED_SUBTYPE must be unique to the platform accessory (if you platform exposes multiple accessories, each accessory
-     * can use the same subtype id.)
-     */
-
-    // Example: add two "motion sensor" services to the accessory
-    const motionSensorOneService = this.accessory.getService('Motion Sensor One Name')
-      || this.accessory.addService(this.platform.Service.MotionSensor, 'Motion Sensor One Name', 'YourUniqueIdentifier-1');
-
-    const motionSensorTwoService = this.accessory.getService('Motion Sensor Two Name')
-      || this.accessory.addService(this.platform.Service.MotionSensor, 'Motion Sensor Two Name', 'YourUniqueIdentifier-2');
-
-    /**
-     * Updating characteristics values asynchronously.
-     *
-     * Example showing how to update the state of a Characteristic asynchronously instead
-     * of using the `on('get')` handlers.
-     * Here we change update the motion sensor trigger states on and off every 10 seconds
-     * the `updateCharacteristic` method.
-     *
-     */
-    let motionDetected = false;
-    setInterval(() => {
-      // EXAMPLE - inverse the trigger
-      motionDetected = !motionDetected;
-
-      // push the new value to HomeKit
-      motionSensorOneService.updateCharacteristic(this.platform.Characteristic.MotionDetected, motionDetected);
-      motionSensorTwoService.updateCharacteristic(this.platform.Characteristic.MotionDetected, !motionDetected);
-
-      this.platform.log.debug('Triggering motionSensorOneService:', motionDetected);
-      this.platform.log.debug('Triggering motionSensorTwoService:', !motionDetected);
-    }, 10000);
+    const read = (getter: (info: ThermostatInfo) => CharacteristicValue) => () => {
+      if (!this.online || !this.current) {
+        throw new platform.api.hap.HapStatusError(platform.api.hap.HAPStatus.SERVICE_COMMUNICATION_FAILURE);
+      }
+      return getter(this.current);
+    };
+    this.thermostat.getCharacteristic(C.CurrentTemperature).setProps({ minValue: -100, maxValue: 100 })
+      .onGet(read(info => info.spaceTemp));
+    this.thermostat.getCharacteristic(C.CurrentHeatingCoolingState).onGet(read(info => equipmentState(info.state)));
+    const mode = this.thermostat.getCharacteristic(C.TargetHeatingCoolingState).onGet(read(info => targetMode(info.mode)));
+    const target = this.thermostat.getCharacteristic(C.TargetTemperature).onGet(read(targetTemperature));
+    const heat = this.thermostat.getCharacteristic(C.HeatingThresholdTemperature).onGet(read(info => info.heatSetpoint));
+    const cool = this.thermostat.getCharacteristic(C.CoolingThresholdTemperature).onGet(read(info => info.coolSetpoint));
+    const units = this.thermostat.getCharacteristic(C.TemperatureDisplayUnits).onGet(read(info => displayUnits(info.tempUnits)));
+    // Display units are reported from the thermostat. No /settings writes.
+    units.setProps({ perms: [Perms.PAIRED_READ, Perms.NOTIFY] });
+    for (const characteristic of [mode, target, heat, cool]) {
+      characteristic.setProps({ perms: platform.options.enableWrites
+        ? [Perms.PAIRED_READ, Perms.PAIRED_WRITE, Perms.NOTIFY] : [Perms.PAIRED_READ, Perms.NOTIFY] });
+    }
+    mode.onSet(value => this.write(info => {
+      const modeValue = this.numeric(value);
+      if (![0, 1, 2, 3].includes(modeValue)) { throw new ControlValidationError('Unsupported HomeKit mode'); }
+      return modeUpdate(info, modeValue);
+    }));
+    target.onSet(value => this.write(info => temperatureUpdate(info, this.numeric(value))));
+    heat.onSet(value => this.write(() => ({ heatSetpoint: this.numeric(value) })));
+    cool.onSet(value => this.write(() => ({ coolSetpoint: this.numeric(value) })));
   }
-
-  /**
-   * Handle "SET" requests from HomeKit
-   * These are sent when the user changes the state of an accessory, for example, turning on a Light bulb.
-   */
-  async setOn(value: CharacteristicValue) {
-    // implement your own code to turn your device on/off
-    this.exampleStates.On = value as boolean;
-
-    this.platform.log.debug('Set Characteristic On ->', value);
+  private numeric(value: CharacteristicValue): number {
+    if (typeof value !== 'number' || !Number.isFinite(value)) { throw new ControlValidationError('Expected a finite number'); }
+    return value;
   }
-
-  /**
-   * Handle the "GET" requests from HomeKit
-   * These are sent when HomeKit wants to know the current state of the accessory, for example, checking if a Light bulb is on.
-   *
-   * GET requests should return as fast as possible. A long delay here will result in
-   * HomeKit being unresponsive and a bad user experience in general.
-   *
-   * If your device takes time to respond you should update the status of your device
-   * asynchronously instead using the `updateCharacteristic` method instead.
-   * In this case, you may decide not to implement `onGet` handlers, which may speed up
-   * the responsiveness of your device in the Home app.
-
-   * @example
-   * this.service.updateCharacteristic(this.platform.Characteristic.On, true)
-   */
-  async getOn(): Promise<CharacteristicValue> {
-    // implement your own code to check if the device is on
-    const isOn = this.exampleStates.On;
-
-    this.platform.log.debug('Get Characteristic On ->', isOn);
-
-    // if you need to return an error to show the device as "Not Responding" in the Home app:
-    // throw new this.platform.api.hap.HapStatusError(this.platform.api.hap.HAPStatus.SERVICE_COMMUNICATION_FAILURE);
-
-    return isOn;
+  private write(update: (info: ThermostatInfo) => ControlUpdate): Promise<void> {
+    return new Promise((resolve, reject) => {
+      this.pendingWrites.push({ update, resolve, reject });
+      clearTimeout(this.writeTimer);
+      this.writeTimer = setTimeout(() => {
+        this.writeTimer = undefined;
+        if (!this.activeWrite) { this.flushWrites(); }
+      }, 350);
+    });
   }
-
-  /**
-   * Handle "SET" requests from HomeKit
-   * These are sent when the user changes the state of an accessory, for example, changing the Brightness
-   */
-  async setBrightness(value: CharacteristicValue) {
-    // implement your own code to set the brightness
-    this.exampleStates.Brightness = value as number;
-
-    this.platform.log.debug('Set Characteristic Brightness -> ', value);
+  private flushWrites(): void {
+    if (this.activeWrite || this.pendingWrites.length === 0) { return; }
+    this.activeWrite = true;
+    const writes = this.pendingWrites.splice(0);
+    let accepted = false;
+    void this.platform.client.control(info => {
+      const combined: ControlUpdate = {};
+      const next = { ...info };
+      for (const write of writes) {
+        const change = write.update(next);
+        Object.assign(combined, change);
+        Object.assign(next, change);
+      }
+      return combined;
+    }, () => {
+      accepted = true;
+      for (const write of writes) { write.resolve(); }
+    }).then(info => {
+      if (this.pendingWrites.length === 0) { this.update(info); }
+    }).catch(error => {
+      if (this.pendingWrites.length === 0 && this.platform.client.latest) { this.update(this.platform.client.latest); }
+      if (accepted) {
+        this.platform.log.warn('Control accepted; readback verification incomplete:', String(error));
+      } else {
+        this.platform.log.warn('Control failed:', String(error));
+        const failure = new this.platform.api.hap.HapStatusError(error instanceof ControlValidationError
+          ? this.platform.api.hap.HAPStatus.INVALID_VALUE_IN_REQUEST : error instanceof RateLimitError
+            ? this.platform.api.hap.HAPStatus.RESOURCE_BUSY : this.platform.api.hap.HAPStatus.SERVICE_COMMUNICATION_FAILURE);
+        for (const write of writes) { write.reject(failure); }
+      }
+    }).finally(() => {
+      this.activeWrite = false;
+      if (this.pendingWrites.length > 0 && !this.writeTimer) { this.flushWrites(); }
+    });
+  }
+  setDevice(device: DeviceInfo): void {
+    const C = this.platform.api.hap.Characteristic;
+    this.accessory.getService(this.platform.api.hap.Service.AccessoryInformation)!
+      .setCharacteristic(C.Manufacturer, device.brand).setCharacteristic(C.Model, device.model)
+      .setCharacteristic(C.FirmwareRevision, device.firmware).setCharacteristic(C.SerialNumber, this.accessory.UUID);
+  }
+  offline(): void {
+    this.online = false;
+    const error = new this.platform.api.hap.HapStatusError(this.platform.api.hap.HAPStatus.SERVICE_COMMUNICATION_FAILURE);
+    const C = this.platform.api.hap.Characteristic;
+    for (const type of [C.CurrentTemperature, C.CurrentHeatingCoolingState, C.TargetHeatingCoolingState,
+      C.TargetTemperature, C.HeatingThresholdTemperature, C.CoolingThresholdTemperature, C.TemperatureDisplayUnits]) {
+      this.thermostat.updateCharacteristic(type, error);
+    }
+    if (this.thermostat.testCharacteristic(C.CurrentRelativeHumidity)) {
+      this.thermostat.updateCharacteristic(C.CurrentRelativeHumidity, error);
+    }
+  }
+  update(info: ThermostatInfo): void {
+    this.current = info;
+    this.online = true;
+    const C = this.platform.api.hap.Characteristic;
+    this.thermostat.getCharacteristic(C.TargetHeatingCoolingState)
+      .setProps({ validValues: [...new Set([0, ...info.availableModes.filter(mode => [0, 1, 2, 3].includes(mode))])] });
+    this.thermostat.getCharacteristic(C.HeatingThresholdTemperature)
+      .setProps({ minValue: info.heatSetpointMin, maxValue: info.heatSetpointMax, minStep: 0.1 });
+    this.thermostat.getCharacteristic(C.CoolingThresholdTemperature)
+      .setProps({ minValue: info.coolSetpointMin, maxValue: info.coolSetpointMax, minStep: 0.1 });
+    const cooling = info.mode === 2;
+    this.thermostat.getCharacteristic(C.TargetTemperature).setProps({
+      minValue: cooling ? info.coolSetpointMin : info.heatSetpointMin,
+      maxValue: cooling ? info.coolSetpointMax : info.heatSetpointMax, minStep: 0.1,
+    });
+    this.thermostat.updateCharacteristic(C.CurrentTemperature, info.spaceTemp)
+      .updateCharacteristic(C.CurrentHeatingCoolingState, equipmentState(info.state))
+      .updateCharacteristic(C.TargetHeatingCoolingState, targetMode(info.mode))
+      .updateCharacteristic(C.TargetTemperature, targetTemperature(info))
+      .updateCharacteristic(C.HeatingThresholdTemperature, info.heatSetpoint)
+      .updateCharacteristic(C.CoolingThresholdTemperature, info.coolSetpoint)
+      .updateCharacteristic(C.TemperatureDisplayUnits, displayUnits(info.tempUnits));
+    if (info.spaceHum !== undefined) {
+      this.thermostat.getCharacteristic(C.CurrentRelativeHumidity).onGet(() => {
+        if (!this.online || this.current?.spaceHum === undefined) {
+          throw new this.platform.api.hap.HapStatusError(this.platform.api.hap.HAPStatus.SERVICE_COMMUNICATION_FAILURE);
+        }
+        return this.current.spaceHum;
+      });
+      this.thermostat.updateCharacteristic(C.CurrentRelativeHumidity, info.spaceHum);
+    } else if (this.thermostat.testCharacteristic(C.CurrentRelativeHumidity)) {
+      this.thermostat.updateCharacteristic(C.CurrentRelativeHumidity,
+        new this.platform.api.hap.HapStatusError(this.platform.api.hap.HAPStatus.SERVICE_COMMUNICATION_FAILURE));
+    }
   }
 }
