@@ -20,6 +20,7 @@ Homebridge integration for Daikin One+ and One Touch thermostats using the [offi
      "host": "daikinone-thermostat-a1b2c3.local",
      "port": 80,
      "pollInterval": 15000,
+     "cacheTtl": 3600000,
      "enableWrites": false
    }
    ```
@@ -27,6 +28,8 @@ Homebridge integration for Daikin One+ and One Touch thermostats using the [offi
 Replace the example hostname with your thermostat's mDNS hostname or reserved IP address. The host must not include `http://` or a port. Port 80 is the default for manual configuration; use the port your thermostat advertises if different. Automatic mDNS discovery is not implemented.
 
 `pollInterval` sets the time between status checks in milliseconds; the default is 15,000 (15 seconds), and the minimum is 5,000.
+
+`cacheTtl` controls how long HomeKit keeps showing the last successful reading after lost connectivity, in milliseconds. The default is 3,600,000 (one hour); set it to `0` for immediate No Response. Expiry is checked after failed polls, so it can occur slightly after the configured time.
 
 Writes are disabled by default. After confirming readings, set `enableWrites` to `true` to control HVAC mode and setpoints.
 

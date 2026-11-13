@@ -132,9 +132,13 @@ test('control rejects API failure and unconfirmed result', async () => {
 });
 test('configuration validation and IPv6 URL', () => {
   assert.equal(parseConfig({ host: 'example.local' }).port, 80);
+  assert.equal(parseConfig({ host: 'example.local' }).cacheTtl, 3_600_000);
+  assert.equal(parseConfig({ host: 'example.local', cacheTtl: 0 }).cacheTtl, 0);
   assert.equal(baseUrl(parseConfig({ host: '::1', port: 8081 })), 'http://[::1]:8081');
   for (const bad of [{}, { host: 'http://host' }, { host: 'host', port: 0 }, { host: 'host', pollInterval: 1 },
-    { host: 'host', enableWrites: 'false' }]) { assert.throws(() => parseConfig(bad)); }
+    { host: 'host', cacheTtl: -1 }, { host: 'host', cacheTtl: 1.5 }, { host: 'host', enableWrites: 'false' }]) {
+    assert.throws(() => parseConfig(bad));
+  }
 });
 
 test('acknowledges before verification and tolerates delayed application without repeating POST', async () => {

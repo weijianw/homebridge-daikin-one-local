@@ -15,6 +15,8 @@ export class DaikinOneLocalPlatform implements DynamicPlatformPlugin {
   private timer?: ReturnType<typeof setTimeout>;
   private stopped = false;
   private connected?: boolean;
+  private lastSuccessfulPoll?: number;
+  private cachedReadingExpired = false;
 
   constructor(public readonly log: Logging, config: PlatformConfig, public readonly api: API) {
     this.options = parseConfig(config);
@@ -45,12 +47,20 @@ export class DaikinOneLocalPlatform implements DynamicPlatformPlugin {
       }
       this.handler.setDevice(this.device);
       this.handler.update(info);
+      this.lastSuccessfulPoll = Date.now();
+      this.cachedReadingExpired = false;
       if (this.connected !== true) { this.log.info('Thermostat connected'); }
       this.connected = true;
     } catch (error) {
-      this.handler?.offline();
+      // A missed poll should not make a brief Wi-Fi dropout appear as No Response.
+      const expired = this.lastSuccessfulPoll === undefined || Date.now() - this.lastSuccessfulPoll >= this.options.cacheTtl;
+      if (expired) { this.handler?.offline(); }
       if (this.connected !== false) { this.log.warn('Thermostat unavailable:', String(error)); }
       else if (this.options.debug) { this.log.debug(String(error)); }
+      if (expired && this.lastSuccessfulPoll !== undefined && !this.cachedReadingExpired) {
+        this.log.warn('Cached thermostat reading expired; HomeKit will report No Response');
+      }
+      this.cachedReadingExpired = expired;
       this.connected = false;
     } finally {
       if (!this.stopped) { this.timer = setTimeout(() => { void this.poll(); }, this.options.pollInterval); }

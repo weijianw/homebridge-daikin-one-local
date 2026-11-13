@@ -57,7 +57,7 @@ test('manual identity survives restart/host change, connectivity transitions and
   const api = Object.assign(events, { hap, platformAccessory: PlatformAccessory,
     registerPlatformAccessories() { registrations++; } });
   const platform = new DaikinOneLocalPlatform({ ...log, warn() { warnings++; }, info() { connections++; } },
-    { platform: 'DaikinOneLocal', host: 'mock' }, api);
+    { platform: 'DaikinOneLocal', host: 'mock', cacheTtl: 30_000 }, api);
   t.after(() => api.emit('shutdown'));
   platform.client.deviceInfo = async () => ({ api_ver: 1, model: 'ONETOUCH', firmware: '4.1.6', brand: 'daikin', type: 'residential' });
   platform.client.info = async () => info;
@@ -65,26 +65,38 @@ test('manual identity survives restart/host change, connectivity transitions and
   await platform.poll();
   assert.equal(registrations, 1);
   const cached = [...platform.accessories.values()][0];
+  const temperature = cached.getService(hap.Service.Thermostat).getCharacteristic(hap.Characteristic.CurrentTemperature);
   platform.client.info = async () => { throw new Error('offline'); };
   clearTimeout(platform.timer);
   await platform.poll();
   clearTimeout(platform.timer);
   await platform.poll();
   assert.equal(warnings, 1);
+  assert.ok(Math.abs(await temperature.handleGetRequest() - info.spaceTemp) < 1e-9);
+  platform.lastSuccessfulPoll -= 30_000;
+  clearTimeout(platform.timer);
+  await platform.poll();
+  assert.equal(warnings, 2);
+  await assert.rejects(temperature.handleGetRequest());
   platform.client.info = async () => info;
   clearTimeout(platform.timer);
   await platform.poll();
   assert.equal(connections, 2);
+  assert.ok(Math.abs(await temperature.handleGetRequest() - info.spaceTemp) < 1e-9);
   api.emit('shutdown');
   assert.equal(platform.timer._destroyed, true);
   const otherApi = Object.assign(new EventEmitter(), { hap, platformAccessory: PlatformAccessory,
     registerPlatformAccessories() { registrations++; } });
-  const restored = new DaikinOneLocalPlatform(log, { platform: 'DaikinOneLocal', host: 'new-host' }, otherApi);
+  const restored = new DaikinOneLocalPlatform(log, { platform: 'DaikinOneLocal', host: 'new-host', cacheTtl: 0 }, otherApi);
   t.after(() => otherApi.emit('shutdown'));
   restored.configureAccessory(cached);
   restored.client.deviceInfo = platform.client.deviceInfo;
   restored.client.info = async () => info;
   await restored.poll();
+  restored.client.info = async () => { throw new Error('offline'); };
+  clearTimeout(restored.timer);
+  await restored.poll();
+  await assert.rejects(temperature.handleGetRequest());
   otherApi.emit('shutdown');
   assert.equal(registrations, 1);
   assert.equal([...restored.accessories.keys()][0], cached.UUID);
